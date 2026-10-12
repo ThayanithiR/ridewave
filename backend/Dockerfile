@@ -18,7 +18,6 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir ".[dev]" aiosqlite "pydantic[email]" "sqlalchemy[asyncio]" greenlet
 
 COPY . .
-RUN pip install --no-cache-dir -e .
 
 # Final runtime image
 FROM python:3.11-slim AS runner
