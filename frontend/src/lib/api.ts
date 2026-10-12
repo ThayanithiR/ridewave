@@ -48,7 +48,16 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
-    if (!res.ok) throw new Error((await res.json()).detail || "Registration failed");
+    if (!res.ok) {
+      let msg = "Registration failed";
+      try {
+        const errData = await res.json();
+        msg = errData.detail || msg;
+      } catch {
+        msg = `${res.status} ${res.statusText}`;
+      }
+      throw new Error(msg);
+    }
     return res.json();
   },
 
@@ -58,7 +67,16 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
     });
-    if (!res.ok) throw new Error((await res.json()).detail || "Login failed");
+    if (!res.ok) {
+      let msg = "Login failed";
+      try {
+        const errData = await res.json();
+        msg = errData.detail || msg;
+      } catch {
+        msg = `${res.status} ${res.statusText}`;
+      }
+      throw new Error(msg);
+    }
     return res.json();
   },
 
