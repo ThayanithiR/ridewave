@@ -1,4 +1,10 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+const rawApi = process.env.NEXT_PUBLIC_API_URL || "";
+const API_BASE =
+  !rawApi || rawApi.includes("xxxx") || rawApi.includes("localhost")
+    ? (typeof window !== "undefined" && window.location.hostname === "localhost"
+        ? "http://localhost:8000/api/v1"
+        : "https://ridewave-backend-k97z.onrender.com/api/v1")
+    : rawApi;
 
 export interface User {
   id: string;
