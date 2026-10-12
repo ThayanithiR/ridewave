@@ -9,7 +9,8 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
-    DATABASE_URL: str = "postgresql+psycopg://ridewave:ridewave_password@localhost:5432/ridewave_db"
+    # Defaults to local SQLite file for zero-config local development without PostgreSQL/Docker
+    DATABASE_URL: str = "sqlite+aiosqlite:///./ridewave.db"
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # AI Configuration
