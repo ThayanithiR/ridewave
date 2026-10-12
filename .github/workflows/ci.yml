@@ -57,6 +57,13 @@ jobs:
           cd backend
           ruff check .
 
+      - name: Run Alembic Database Migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://ridewave:ridewave_password@localhost:5432/ridewave_db
+        run: |
+          cd backend
+          alembic upgrade head
+
       - name: Run Pytest Test Suite
         env:
           DATABASE_URL: postgresql+psycopg://ridewave:ridewave_password@localhost:5432/ridewave_db

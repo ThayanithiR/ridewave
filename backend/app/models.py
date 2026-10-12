@@ -148,6 +148,9 @@ class Ride(Base):
             postgresql_where=(
                 status.in_([RideStatus.ACCEPTED, RideStatus.ARRIVED, RideStatus.IN_PROGRESS])
             ),
+            sqlite_where=(
+                status.in_([RideStatus.ACCEPTED, RideStatus.ARRIVED, RideStatus.IN_PROGRESS])
+            ),
         ),
     )
 
@@ -179,8 +182,9 @@ class IdempotencyKey(Base):
     )
     key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     request_path: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     response_status: Mapped[int] = mapped_column(nullable=False)
-    response_body: Mapped[str] = mapped_column(Text, nullable=False)
+    response_body: Mapped[Text] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, nullable=False
     )

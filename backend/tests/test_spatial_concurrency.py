@@ -43,22 +43,41 @@ def test_driver_route_interpolation():
     assert points[-1] == end
 
 
+import asyncio
+import os
+import uuid
+from sqlalchemy import select
+from app.models import Driver, Ride, RideStatus
+
+
 @pytest.mark.asyncio
 async def test_concurrent_driver_assignment_safety():
     """
-    Simulate two riders concurrently attempting to accept / match the exact same driver.
-    Only ONE rider request must succeed; the second must fail with 409 Conflict.
+    True Concurrency Test:
+    Simultaneously dispatches two overlapping accept requests for the exact same driver
+    across two distinct rides using asyncio.gather().
+    Uses separate database connections/sessions to guarantee true multi-connection race conditions.
+    Asserts that:
+      1. Exactly one request succeeds (HTTP 200).
+      2. The competing request receives a defined conflict response (HTTP 409).
+      3. Exactly one active ride is assigned to the driver in the database.
+      4. The driver profile status is BUSY.
     """
-    async with test_engine.begin() as conn:
+    concur_db_path = f"./test_concur_{uuid.uuid4().hex[:8]}.db"
+    concur_engine = create_async_engine(f"sqlite+aiosqlite:///{concur_db_path}")
+    concur_sessionmaker = async_sessionmaker(bind=concur_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with concur_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    async with TestingSessionLocal() as session:
-
-        async def override_get_db():
+    async def override_get_db():
+        async with concur_sessionmaker() as session:
             yield session
 
-        app.dependency_overrides[get_db] = override_get_db
-        transport = ASGITransport(app=app)
+    app.dependency_overrides[get_db] = override_get_db
+    transport = ASGITransport(app=app)
+
+    try:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # 1. Register Rider 1 and Rider 2
             await client.post(
@@ -121,7 +140,7 @@ async def test_concurrent_driver_assignment_safety():
                 json={"status": "ONLINE"},
             )
 
-            # 3. Rider 1 requests a ride
+            # 3. Rider 1 and Rider 2 create separate rides
             ride1_resp = await client.post(
                 "/api/v1/rides",
                 headers={"Authorization": f"Bearer {r1_token}"},
@@ -136,13 +155,6 @@ async def test_concurrent_driver_assignment_safety():
             )
             ride1_id = ride1_resp.json()["id"]
 
-            # 4. Driver accepts Ride 1
-            accept1 = await client.post(
-                f"/api/v1/rides/{ride1_id}/accept", headers={"Authorization": f"Bearer {d1_token}"}
-            )
-            assert accept1.status_code == 200
-
-            # 5. Rider 2 requests another ride
             ride2_resp = await client.post(
                 "/api/v1/rides",
                 headers={"Authorization": f"Bearer {r2_token}"},
@@ -157,11 +169,45 @@ async def test_concurrent_driver_assignment_safety():
             )
             ride2_id = ride2_resp.json()["id"]
 
-            # 6. Driver tries to accept Ride 2 while already BUSY with Ride 1
-            accept2 = await client.post(
-                f"/api/v1/rides/{ride2_id}/accept", headers={"Authorization": f"Bearer {d1_token}"}
+            # 4. Trigger simultaneous concurrent assignment for the SAME driver
+            task1 = client.post(
+                f"/api/v1/rides/{ride1_id}/accept",
+                headers={"Authorization": f"Bearer {d1_token}"},
             )
-            # Invariant verified: Driver is BUSY, second assignment fails
-            assert accept2.status_code in [400, 409]
+            task2 = client.post(
+                f"/api/v1/rides/{ride2_id}/accept",
+                headers={"Authorization": f"Bearer {d1_token}"},
+            )
 
+            resps = await asyncio.gather(task1, task2)
+            status_codes = sorted([r.status_code for r in resps])
+
+            # Invariant: Exactly one winner (200 OK) and one conflict (409 Conflict)
+            assert status_codes == [200, 409], f"Expected [200, 409], got {status_codes}"
+
+            # 5. Verify database consistency via driver endpoint
+            driver_check = await client.get(
+                "/api/v1/drivers/me", headers={"Authorization": f"Bearer {d1_token}"}
+            )
+            driver_data = driver_check.json()
+            assert driver_data["status"] == "BUSY"
+
+        # 6. Direct DB verification: Exactly 1 active ride assigned
+        async with concur_sessionmaker() as session:
+            driver_obj = (await session.execute(select(Driver).where(Driver.id == uuid.UUID(driver_data["id"])))).scalar_one()
+            assert driver_obj.status.value == "BUSY"
+
+            active_rides_stmt = select(Ride).where(
+                Ride.driver_id == driver_obj.id,
+                Ride.status.in_([RideStatus.ACCEPTED, RideStatus.ARRIVED, RideStatus.IN_PROGRESS]),
+            )
+            active_rides = (await session.execute(active_rides_stmt)).scalars().all()
+            assert len(active_rides) == 1
+    finally:
         app.dependency_overrides.clear()
+        await concur_engine.dispose()
+        if os.path.exists(concur_db_path):
+            try:
+                os.remove(concur_db_path)
+            except OSError:
+                pass

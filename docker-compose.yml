@@ -9,8 +9,9 @@ services:
       POSTGRES_USER: ridewave
       POSTGRES_PASSWORD: ridewave_password
       POSTGRES_DB: ridewave_db
+    # Bind exclusively to 127.0.0.1 to avoid exposing the database across public host interfaces
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -23,8 +24,9 @@ services:
     image: redis:7-alpine
     container_name: ridewave-redis
     restart: unless-stopped
+    # Bind exclusively to 127.0.0.1 to avoid public cache exposure
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -45,13 +47,13 @@ services:
       redis:
         condition: service_healthy
     environment:
-      APP_ENV: production
+      APP_ENV: development
       DATABASE_URL: postgresql+psycopg://ridewave:ridewave_password@postgres:5432/ridewave_db
       REDIS_URL: redis://redis:6379/0
-      SECRET_KEY: production-super-secret-key-change-me
+      SECRET_KEY: ${SECRET_KEY:-local-dev-secret-key-minimum-32-characters}
       AI_ENABLED: "false"
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   frontend:
     build:

@@ -210,3 +210,119 @@ async def test_idempotency_duplicate_ride_prevention(client: AsyncClient):
     )
     assert resp2.status_code in [200, 201]
     assert resp1.json()["id"] == resp2.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_idempotency_payload_mismatch_conflict(client: AsyncClient):
+    """Reusing an existing idempotency key with a changed payload MUST return HTTP 409 Conflict."""
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": "mismatch@test.com", "password": "pass123", "full_name": "R", "role": "RIDER"},
+    )
+    token = (
+        await client.post(
+            "/api/v1/auth/login", json={"email": "mismatch@test.com", "password": "pass123"}
+        )
+    ).json()["access_token"]
+
+    key = "idem-mismatch-key-999"
+    payload_a = {
+        "pickup_latitude": 40.71,
+        "pickup_longitude": -74.00,
+        "pickup_address": "Original A",
+        "dropoff_latitude": 40.75,
+        "dropoff_longitude": -73.98,
+        "dropoff_address": "Original B",
+        "idempotency_key": key,
+    }
+    r1 = await client.post("/api/v1/rides", headers={"Authorization": f"Bearer {token}"}, json=payload_a)
+    assert r1.status_code == 201
+
+    payload_b = {
+        "pickup_latitude": 40.71,
+        "pickup_longitude": -74.00,
+        "pickup_address": "Original A",
+        "dropoff_latitude": 40.80,  # Changed destination
+        "dropoff_longitude": -73.90,
+        "dropoff_address": "Altered Destination",
+        "idempotency_key": key,
+    }
+    r2 = await client.post("/api/v1/rides", headers={"Authorization": f"Bearer {token}"}, json=payload_b)
+    assert r2.status_code == 409
+    assert "different request payload" in r2.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_ride_lifecycle_transitions(client: AsyncClient):
+    """Asserts that invalid state transitions are rejected with HTTP 400 Bad Request."""
+    # Register Rider
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": "rider_trans@test.com", "password": "password123", "full_name": "RT", "role": "RIDER"},
+    )
+    r_token = (
+        await client.post(
+            "/api/v1/auth/login", json={"email": "rider_trans@test.com", "password": "password123"}
+        )
+    ).json()["access_token"]
+
+    # Register Driver
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": "driver_trans@test.com", "password": "password123", "full_name": "DT", "role": "DRIVER"},
+    )
+    d_token = (
+        await client.post(
+            "/api/v1/auth/login", json={"email": "driver_trans@test.com", "password": "password123"}
+        )
+    ).json()["access_token"]
+    await client.post(
+        "/api/v1/drivers/register",
+        headers={"Authorization": f"Bearer {d_token}"},
+        json={"vehicle_make": "Tesla", "vehicle_model": "3", "vehicle_plate": "TRANS-1"},
+    )
+    await client.patch(
+        "/api/v1/drivers/status",
+        headers={"Authorization": f"Bearer {d_token}"},
+        json={"status": "ONLINE"},
+    )
+
+    # 1. Create Ride
+    ride_resp = await client.post(
+        "/api/v1/rides",
+        headers={"Authorization": f"Bearer {r_token}"},
+        json={
+            "pickup_latitude": 40.71,
+            "pickup_longitude": -74.00,
+            "pickup_address": "Start",
+            "dropoff_latitude": 40.75,
+            "dropoff_longitude": -73.98,
+            "dropoff_address": "End",
+        },
+    )
+    ride_id = ride_resp.json()["id"]
+
+    # 2. Cannot start trip while still in REQUESTED state
+    invalid_start = await client.post(
+        f"/api/v1/rides/{ride_id}/start", headers={"Authorization": f"Bearer {d_token}"}
+    )
+    assert invalid_start.status_code in [400, 403]
+
+    # 3. Cannot complete trip while still in REQUESTED state
+    invalid_complete = await client.post(
+        f"/api/v1/rides/{ride_id}/complete", headers={"Authorization": f"Bearer {d_token}"}
+    )
+    assert invalid_complete.status_code in [400, 403]
+
+    # 4. Accept ride
+    accept = await client.post(
+        f"/api/v1/rides/{ride_id}/accept", headers={"Authorization": f"Bearer {d_token}"}
+    )
+    assert accept.status_code == 200
+
+    # 5. Cannot complete ride directly from ACCEPTED (must ARRIVE and START first)
+    skip_complete = await client.post(
+        f"/api/v1/rides/{ride_id}/complete", headers={"Authorization": f"Bearer {d_token}"}
+    )
+    assert skip_complete.status_code == 400
+    assert "Invalid ride transition" in skip_complete.json()["detail"]

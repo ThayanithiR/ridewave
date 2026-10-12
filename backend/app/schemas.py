@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from app.models import DriverStatus, RideStatus, UserRole
 
@@ -27,14 +27,13 @@ class TokenResponse(BaseModel):
 
 
 class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: uuid.UUID
     email: EmailStr
     full_name: str
     role: UserRole
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 # --- Driver Schemas ---
@@ -45,6 +44,8 @@ class DriverRegisterRequest(BaseModel):
 
 
 class DriverResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: uuid.UUID
     user_id: uuid.UUID
     status: DriverStatus
@@ -53,9 +54,6 @@ class DriverResponse(BaseModel):
     vehicle_plate: str
     last_latitude: float | None = None
     last_longitude: float | None = None
-
-    class Config:
-        from_attributes = True
 
 
 class DriverStatusUpdateRequest(BaseModel):
@@ -94,6 +92,8 @@ class RideCreateRequest(BaseModel):
 
 
 class RideResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: uuid.UUID
     rider_id: uuid.UUID
     driver_id: uuid.UUID | None = None
@@ -113,9 +113,6 @@ class RideResponse(BaseModel):
     completed_at: datetime | None = None
     cancelled_at: datetime | None = None
     cancellation_reason: str | None = None
-
-    class Config:
-        from_attributes = True
 
 
 class RideCancelRequest(BaseModel):

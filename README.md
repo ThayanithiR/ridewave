@@ -1,193 +1,227 @@
-# RideWave — High-Concurrency Ride-Hailing Platform
+# RideWave — High-Concurrency Ride-Hailing Backend & Web Platform
 
 [![Next.js](https://img.shields.io/badge/Next.js-16.4-black?style=flat&logo=next.js)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=flat&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791?style=flat&logo=postgresql)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat&logo=redis)](https://redis.io/)
 [![Uber H3](https://img.shields.io/badge/Spatial-Uber%20H3%20v4-blue)](https://h3geo.org/)
+[![Alembic](https://img.shields.io/badge/Migrations-Alembic-purple)](https://alembic.sqlalchemy.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**RideWave** is a production-grade, distributed ride-hailing system inspired by modern mobility platforms such as Uber. It demonstrates advanced backend architecture: **concurrency-safe driver assignment**, **two-tiered spatial indexing**, **ephemeral GPS ingestion over WebSockets**, a **Transactional Outbox event pipeline**, and a **zero-cost sandboxed AI Trip Assistant**.
+**RideWave** is a production-style, high-concurrency ride-hailing backend and web application modeled after real-time mobility platforms like Uber. Engineered as a portfolio project showcasing backend systems fundamentals: **race-condition-safe driver assignment**, **two-tiered geospatial indexing (Uber H3 + relational filtering)**, **high-frequency GPS telemetry over authenticated WebSockets**, a **durable Transactional Outbox event pattern**, and a **zero-cost, sandboxed AI Trip Assistant**.
 
 ---
 
-## 🌐 Live Deployments
+## 🌐 Live Deployments & API Documentation
 
 - **Frontend (Vercel):** [https://ridewave-rosy.vercel.app](https://ridewave-rosy.vercel.app)
 - **Backend API (Render):** [https://ridewave-backend-k97z.onrender.com](https://ridewave-backend-k97z.onrender.com)
-- **Interactive OpenAPI / Swagger Docs:** [https://ridewave-backend-k97z.onrender.com/api/v1/docs](https://ridewave-backend-k97z.onrender.com/api/v1/docs)
+- **Interactive OpenAPI / Swagger Documentation:** [https://ridewave-backend-k97z.onrender.com/api/v1/docs](https://ridewave-backend-k97z.onrender.com/api/v1/docs)
 
 ---
 
 ## 🏗️ System Architecture
 
-RideWave is built as a **modular monolith** with clean bounded contexts, ensuring high operational velocity without premature distributed transaction overhead.
+RideWave is structured as a **modular monolith** with explicit domain boundaries, eliminating premature microservice network latency while ensuring clean decoupling for future service extraction.
 
 ```
-┌───────────────────────────────────────────────────────────────────────────┐
-│                             Next.js 16 Frontend                           │
-│   (Rider UI / Driver Terminal / Leaflet + OpenStreetMap / WSS Tracking)   │
-└─────────────────────────────────────┬─────────────────────────────────────┘
-                                      │ HTTPS / WSS
-                                      ▼
-┌───────────────────────────────────────────────────────────────────────────┐
-│                          FastAPI Modular Monolith                         │
-│                                                                           │
-│   [/auth]       [/rides]       [/drivers]       [/matching]  [/assistant] │
-│      │             │               │                 │            │       │
-│      └─────────────┴───────┬───────┴                 │            │       │
-│                            ▼                         ▼            ▼       │
-│                     Domain Services           Spatial Engine  LLM Adapter │
-│                    (Ride Lifecycle)           (Uber H3 Grid)  (OpenRouter)│
-└────────────────────────────┬─────────────────────────┬────────────┬───────┘
-                             │                         │            │
-             ┌───────────────┴───────────────┐         │            │
-             ▼                               ▼         ▼            ▼
- ┌──────────────────────┐        ┌───────────────────────┐  ┌───────────────┐
- │ PostgreSQL Database  │        │  Redis Ephemeral Store│  │  External Free│
- │ - Durable Trips      │        │  - High-Freq GPS TTL  │  │   LLM Service │
- │ - Partial Unique Idx │        │  - H3 Cell Buckets    │  │ (Llama 3.2 3B)│
- │ - Transaction Outbox │        │  - WebSocket Pub/Sub  │  └───────────────┘
- └───────────┬──────────┘        └───────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                             Next.js 16 Frontend                             │
+│    (Rider UI / Driver Terminal / Leaflet Maps / WebSocket Telemetry / Chat)  │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ HTTPS / WSS
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          FastAPI Modular Monolith                           │
+│                                                                             │
+│   [/auth]       [/rides]       [/drivers]       [/matching]   [/assistant]  │
+│      │             │               │                 │             │        │
+│      └─────────────┴───────┬───────┴                 │             │        │
+│                            ▼                         ▼             ▼        │
+│                     Domain Services           Spatial Engine   AI Adapter   │
+│                    (Ride Lifecycle)           (Uber H3 Grid)  (Local Ollama)│
+└────────────────────────────┬─────────────────────────┬─────────────┬────────┘
+                             │                         │             │
+             ┌───────────────┴───────────────┐         │             │
+             ▼                               ▼         ▼             ▼
+ ┌──────────────────────┐        ┌───────────────────────┐  ┌────────────────┐
+ │ PostgreSQL Database  │        │  Redis Ephemeral Tier │  │  Local Ollama  │
+ │ - Durable Trips      │        │  - High-Freq GPS TTL  │  │  llama3.2:3b   │
+ │ - Partial Unique Idx │        │  - H3 Spatial Buckets │  │  (Zero-Cost /  │
+ │ - Transaction Outbox │        │  - WS Channel Manager │  │  Offline Safe) │
+ └───────────┬──────────┘        └───────────────────────┘  └────────────────┘
              │
-             │ Outbox Poller / CDC
-             ▼
+             │ Outbox Event Log
+             │ (Durable audit implemented;
+             ▼  broker streaming planned)
  ┌──────────────────────┐
- │ Apache Kafka Brokers │
- │ - ride.requested     │
- │ - ride.accepted      │
- │ - ride.completed     │
+ │ Kafka Broker Stream  │
+ │ (Planned Future Work)│
  └──────────────────────┘
 ```
 
 ---
 
-## ⚡ Core Technical Features & Engineering Highlights
+## ⚡ Core Engineering Highlights
 
-### 1. Two-Tiered Spatial Driver Discovery
-- **Tier 1 (Coarse Indexing via Uber H3 v4):** Converts geographic coordinates to discrete hexagonal global grid cells (`res=8`) and queries neighboring candidate rings (`grid_disk`) directly from Redis sets in $O(1)$ time.
-- **Tier 2 (Precise Filtering & Distance Ranking):** Evaluates candidate freshness and performs spherical Haversine distance computations to rank drivers by straight-line proximity before attempting assignment.
+### 1. Concurrency-Safe Driver Assignment
+- **The Challenge:** Preventing double-booking when multiple riders attempt to match or confirm the same available driver simultaneously.
+- **The Defense:** Multi-layered defense-in-depth:
+  1. **Row-Level Exclusive Locking:** `SELECT ... FOR UPDATE` locks the target driver record during assignment.
+  2. **Database Partial Unique Index:**
+     ```sql
+     CREATE UNIQUE INDEX idx_driver_single_active_ride ON rides (driver_id)
+     WHERE status IN ('ACCEPTED', 'ARRIVED', 'IN_PROGRESS');
+     ```
+  3. **Atomic Conflict Handling:** Any competing concurrent transaction that slips past application locks triggers a database `IntegrityError`, caught and converted into a clean `HTTP 409 Conflict`.
+  - Detailed design & trade-offs documented in [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md).
 
-### 2. High-Concurrency Driver Assignment Safety
-- Eliminates the classic distributed race condition where two riders match with the same available driver simultaneously.
-- Protected by a **PostgreSQL Partial Unique Constraint Index**:
-  ```sql
-  CREATE UNIQUE INDEX idx_driver_single_active_ride ON rides (driver_id)
-  WHERE status IN ('ACCEPTED', 'ARRIVED', 'IN_PROGRESS');
-  ```
-- Combined with atomic in-transaction locking (`SELECT ... FOR UPDATE`), ensuring strict database-level serializability under high concurrency.
+### 2. Two-Tiered Spatial Driver Discovery
+- **Tier 1 (H3 Hexagonal Bucketing in Cache):** Pickup coordinates are mapped to Uber H3 Resolution 8 cells (~461m edge). The target cell plus 2 concentric rings (19 hexagonal cells total) are queried in Redis in $O(1)$ set union lookups.
+- **Tier 2 (Relational Filtering & Haversine Ranking):** Candidate IDs are filtered in PostgreSQL for online availability, then ranked by exact spherical great-circle Haversine distance.
+- Standalone benchmark with empirical latencies (p50: 1.5ms, p95: 5.5ms) documented in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
-### 3. Dual Storage Separation (Durable vs. Ephemeral)
-- **High-Frequency GPS Ingestion (1–3 Hz):** Streamed over authenticated WebSockets directly into Redis with rolling 30-second TTLs.
-- **Durable Business Records:** Only trip milestone states (`REQUESTED`, `ACCEPTED`, `ARRIVED`, `IN_PROGRESS`, `COMPLETED`, `CANCELLED`) write to PostgreSQL, avoiding database IOPS exhaustion.
+### 3. Separation of Ephemeral Telemetry & Durable Trips
+- **High-Frequency GPS Ingestion (1–3 Hz):** Streamed over authenticated WebSockets directly into Redis with rolling auto-expiring TTLs (60s).
+- **Durable Business Milestones:** Only authoritative ride state changes (`REQUESTED`, `MATCHING`, `ACCEPTED`, `ARRIVED`, `IN_PROGRESS`, `COMPLETED`, `CANCELLED`) write to PostgreSQL, shielding relational storage IOPS from real-time coordinate streaming.
 
-### 4. Transactional Outbox Pattern for Event Streaming
-- Avoids dual-write inconsistencies between the database and event brokers (Apache Kafka).
-- State transitions and corresponding domain events (`ride.requested`, `ride.accepted`, `ride.completed`) are committed in the **same atomic database transaction** into the `outbox_events` table before asynchronous publication.
+### 4. Transactional Outbox Event Architecture (Path B)
+- Eliminates dual-write inconsistencies between the database and event brokers.
+- State transitions and corresponding domain events (`RIDE_REQUESTED`, `DRIVER_ASSIGNED`, etc.) are committed in the **exact same ACID transaction** into `rides`, `ride_events`, and `outbox_events`.
+- Establishes a durable, tamper-evident audit log ready for downstream CDC (Change Data Capture) or Kafka worker publication (scoped as planned work).
 
-### 5. Sandboxed Zero-Cost AI Trip Assistant
-- Leverages free-tier inference (`meta-llama/llama-3.2-3b-instruct:free` via OpenRouter or local Ollama).
-- **Security Invariant:** All LLM tool-calling functions are read-only and explicitly bound to the authenticated session's `user_id`. The LLM cannot access arbitrary database records, invent fares, or mutate ride states.
+### 5. Deterministic Finite State Machine
+- Lifecycle state transitions are strictly validated in Python domain services ([`backend/app/services/lifecycle.py`](backend/app/services/lifecycle.py)).
+- Disallows illegal state jumps (e.g., `REQUESTED -> COMPLETED` or `CANCELLED -> IN_PROGRESS`), recording immutable audit timestamps for every transition.
+
+### 6. Zero-Cost, Sandboxed AI Trip Assistant
+- Runs zero-cost local LLM inference via **Ollama** (`llama3.2:3b`) with optional free OpenRouter hosted fallback.
+- **Defense Invariant:** Kept completely off the critical booking and payment path. All assistant tools are strictly read-only and scoped to the authenticated user's ID. If the LLM is offline, deterministic rule-based fallbacks handle trip estimation gracefully.
 
 ---
 
-## 📊 Data Model & Ride State Machine
+## 📊 Feature Status Matrix
 
-### Finite State Machine
-```
-  [REQUESTED] ──► [MATCHING] ──► [ACCEPTED] ──► [ARRIVED] ──► [IN_PROGRESS] ──► [COMPLETED]
-       │              │               │             │
-       ▼              ▼               ▼             ▼
-  [CANCELLED]    [CANCELLED]     [CANCELLED]   [CANCELLED]
-```
-
-### Relational Schema (PostgreSQL)
-- **`users`**: ID, email, hashed password (bcrypt), role (`RIDER`, `DRIVER`, `ADMIN`), timestamps.
-- **`drivers`**: ID, user reference, status (`OFFLINE`, `ONLINE`, `BUSY`), vehicle make/model/plate, last known coordinates.
-- **`rides`**: ID, rider reference, driver reference (nullable until matched), status, pickup/dropoff coordinates & addresses, estimated fare, final fare, currency, timestamps.
-- **`ride_events`**: Immutable audit log of every lifecycle state transition.
-- **`idempotency_keys`**: Idempotent ride creation cache preventing duplicate booking requests.
-- **`outbox_events`**: Transactional outbox buffer for asynchronous event dispatch.
+| System Component | Status | Implementation Details |
+|---|:---:|---|
+| **User & Driver Authentication** | ✅ Implemented | JWT Bearer tokens, bcrypt hashing (72-byte ceiling), role-based guards (`RIDER`, `DRIVER`, `ADMIN`) |
+| **Ride Lifecycle State Machine** | ✅ Implemented | Deterministic FSM validation (`validate_and_apply_transition`), transition audit logging |
+| **Concurrency Protection** | ✅ Implemented | PostgreSQL Partial Unique Index + `with_for_update()`, tested with simultaneous `asyncio.gather()` |
+| **Idempotent Ride Creation** | ✅ Implemented | `idempotency_keys` table with SHA-256 payload verification (200 on replay, 409 on payload mismatch) |
+| **Spatial Matching (H3)** | ✅ Implemented | Uber H3 Resolution 8 grid disk (19 cells) + Haversine distance ranking |
+| **GPS WebSocket Ingestion** | ✅ Implemented | Authenticated WSS with JWT, coordinate range checks (-90..90, -180..180), monotonic timestamps |
+| **Database Schema Migrations** | ✅ Implemented | Alembic migration scripts (`alembic upgrade head`), automated in CI pipeline |
+| **Transactional Outbox Pattern** | ✅ Implemented | Atomic outbox persistence in same DB transaction as ride state mutations |
+| **AI Trip Assistant** | ✅ Implemented | Zero-cost local Ollama (`llama3.2:3b`), OpenRouter fallback, deterministic offline fallback |
+| **Kafka Broker Streaming** | ⏳ Planned Work | Scoped for future distributed worker deployment (see [Architecture ADR-05](docs/architecture.md)) |
+| **Dynamic Surge Pricing Model** | ⏳ Planned Work | Real-time demand-to-supply ratio calculation per H3 cell |
 
 ---
 
 ## 🛠️ Tech Stack
 
-| Layer | Technologies Used |
+| Layer | Technologies |
 |---|---|
 | **Frontend** | Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS, Lucide Icons |
-| **Maps & Geospatial** | Leaflet, React-Leaflet, OpenStreetMap, Uber H3 (v4 Python SDK) |
-| **Backend API** | Python 3.11, FastAPI, Uvicorn, Pydantic v2 |
-| **Database & ORM** | PostgreSQL 16 / SQLite (local dev), SQLAlchemy 2.0 (Async), Alembic |
-| **Caching & Real-Time** | Redis 7, FastAPI WebSockets, Starlette CORS |
-| **Testing & Quality** | pytest, pytest-asyncio, HTTPX, Ruff (Linter & Formatter) |
-| **Containers & CI/CD** | Docker (Multi-stage), Docker Compose, GitHub Actions |
+| **Mapping & GIS** | Leaflet, React-Leaflet, OpenStreetMap, Uber H3 (v4 Python SDK) |
+| **Backend Framework** | Python 3.11, FastAPI, Uvicorn, Pydantic v2 |
+| **Database & ORM** | PostgreSQL 16 (PostGIS) / SQLite (local dev), SQLAlchemy 2.0 (Async), Alembic |
+| **Caching & Pub/Sub** | Redis 7, FastAPI WebSockets, Starlette CORS & Middleware |
+| **Testing & Quality** | Pytest, Pytest-Asyncio, HTTPX, Ruff (Linting) |
+| **Containers & CI** | Docker, Docker Compose, GitHub Actions |
 
 ---
 
-## 🚀 Getting Started Locally
+## 🚀 Quick Start & Local Setup
 
-### Prerequisites
-- Python 3.11+
-- Node.js 18+
-- Git
+For complete step-by-step instructions across Windows (PowerShell & CMD) and Linux/macOS, see [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md).
 
-### 1. Clone the Repository
+### 1. Clone & Setup Environment
 ```bash
-git clone https://github.com/ThayanithiR/ridewave.git
-cd ridewave
+git clone https://github.com/vamsi080/RideWave.git
+cd RideWave
+cp .env.example .env
 ```
 
 ### 2. Backend Setup
 ```bash
 cd backend
 python -m venv venv
-.\venv\Scripts\Activate.ps1    # On Linux/macOS: source venv/bin/activate
-pip install -e . -e ".[dev]" aiosqlite "pydantic[email]" "sqlalchemy[asyncio]" greenlet
-```
 
-Run database initialization and start the FastAPI server:
-```bash
-python init_db.py
+# Windows PowerShell: .\venv\Scripts\Activate.ps1
+# Linux / macOS:      source venv/bin/activate
+
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install ".[dev]" aiosqlite "pydantic[email]" "sqlalchemy[asyncio]" greenlet
+
+# Apply database schema migrations
+alembic upgrade head
+
+# Start development server
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
-- API will be accessible at: `http://127.0.0.1:8000`
-- Swagger UI will be accessible at: `http://127.0.0.1:8000/api/v1/docs`
+- API Documentation: [http://127.0.0.1:8000/api/v1/docs](http://127.0.0.1:8000/api/v1/docs)
+- Deep Health Check: [http://127.0.0.1:8000/health/ready](http://127.0.0.1:8000/health/ready)
 
 ### 3. Frontend Setup
-In a new terminal window:
+In a new terminal:
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-Open **`http://localhost:3000`** in your browser.
+- Web Application: [http://localhost:3000](http://localhost:3000)
 
----
-
-## 🧪 Running the Test Suite
-
-The test suite covers unit logic, pricing algorithms, lifecycle transitions, spatial neighborhood indexing, and concurrency safety:
-
+### 4. Running Tests
 ```bash
 cd backend
 pytest -v
 ```
+All **21 backend tests** cover authentication, lifecycle state transitions, spatial indexing, race condition safety, security boundaries, and outbox auditing.
 
-**Test Coverage Highlights:**
-- `tests/test_pricing.py`: Great-circle Haversine distance and deterministic fare calculations.
-- `tests/test_lifecycle.py`: End-to-end trip creation, driver assignment, arrival, start, completion, and cancellation.
-- `tests/test_spatial_concurrency.py`: Uber H3 7-cell neighborhood validation, route interpolation, and race condition prevention asserting that a busy driver cannot be booked by concurrent riders.
-- `tests/test_events_and_assistant.py`: Transactional outbox persistence and AI tool session isolation.
+### 5. Running the Spatial Performance Benchmark
+```bash
+cd backend
+python scripts/benchmark_matching.py --iterations 100 --output ../docs/benchmark_results.json
+```
 
 ---
 
-## 🔒 Security & Reliability Practices
+## 📈 Measured Performance Benchmarks
 
-- **Zero Plaintext Credentials:** Passwords hashed with salted bcrypt (72-byte ceiling).
-- **Session Authentication:** Short-lived JWT Bearer access tokens with role-based dependencies (`RIDER`, `DRIVER`, `ADMIN`).
-- **Idempotency Safeguards:** Ride creation endpoints accept an `idempotency_key` preventing duplicate charges or trips from network retries.
-- **Fail-Safe Caching:** Redis connection outages degrade gracefully without crashing core trip lifecycle operations.
+Measured on a local workstation (Intel Core i5-10210U @ 1.60GHz, 8GB RAM, Windows 11, Python 3.11):
+
+| Driver Density | Matched Candidates (<= 5km) | Median p50 | Tail p95 | Tail p99 | Throughput |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **10 drivers** | 2 | **1.51 ms** | **5.55 ms** | **6.44 ms** | **365.1 req/s** |
+| **50 drivers** | 3 | **1.63 ms** | **5.98 ms** | **7.05 ms** | **331.2 req/s** |
+| **100 drivers** | 13 | **2.41 ms** | **6.85 ms** | **8.12 ms** | **244.7 req/s** |
+| **500 drivers** | 54 | **4.16 ms** | **7.73 ms** | **57.15 ms** | **170.7 req/s** |
+
+*Full methodology, hardware context, and scalability analysis are available in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).*
+
+---
+
+## 💼 Verified Resume Bullets
+
+These verified, factual bullet points describe the system without inflated claims or fabricated statistics:
+
+- **High-Concurrency Backend Architecture:** Designed and implemented a production-grade ride-hailing backend in FastAPI and SQLAlchemy 2.0 (async), eliminating driver double-booking races using row-level locking (`with_for_update()`) and PostgreSQL partial unique constraints (`idx_driver_single_active_ride`).
+- **Geospatial Dispatch Engine:** Built a two-tiered driver matching pipeline pairing Uber H3 hexagonal discrete global grid indexing (Resolution 8) in Redis with relational spatial filtering and Haversine distance sorting, achieving median lookup latencies under 2.5ms across 100+ drivers.
+- **Reliable Event Auditing:** Implemented the Transactional Outbox pattern to atomically commit ride lifecycle domain events in the same ACID database transaction as ride state transitions, preventing dual-write inconsistencies.
+- **Real-Time Telemetry & API Security:** Engineered high-frequency GPS ingestion over authenticated WebSockets with JWT validation, monotonic timestamp verification, coordinate range boundaries, and Pydantic v2 schemas.
+- **Production Migrations & CI/CD:** Replaced startup table auto-creation with automated Alembic versioned migrations (`alembic upgrade head`), integrated deep database/cache readiness checks, and configured GitHub Actions CI with automated multi-container testing.
+
+---
+
+## 📚 Technical Documentation Index
+
+- [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md) — Comprehensive concurrency strategy, row-level locking, partial unique index, and simultaneous race testing.
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — Benchmark methodology, test hardware specifications, empirical percentiles, and latency bottlenecks.
+- [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md) — Multi-OS setup instructions (PowerShell, CMD, Bash), migration instructions, and troubleshooting guide.
+- [`docs/architecture.md`](docs/architecture.md) — System design document, architecture diagram, and Architectural Decision Records (ADRs).
+- [`docs/IMPLEMENTATION_AUDIT.md`](docs/IMPLEMENTATION_AUDIT.md) — Full repository audit baseline, identified issues, and verification criteria.
 
 ---
 

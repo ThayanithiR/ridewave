@@ -1,9 +1,11 @@
+import hashlib
 import json
 import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, select
+from sqlalchemy import and_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_role
@@ -25,6 +27,7 @@ from app.schemas import (
     RideCreateRequest,
     RideResponse,
 )
+from app.services.lifecycle import validate_and_apply_transition
 from app.services.pricing import calculate_fare, haversine_distance_km
 
 router = APIRouter(prefix="/rides", tags=["Rides"])
@@ -44,6 +47,19 @@ async def create_ride(
     current_user: User = Depends(require_role(UserRole.RIDER)),
     db: AsyncSession = Depends(get_db),
 ):
+    # Compute deterministic SHA-256 payload hash
+    payload_dict = {
+        "pickup_latitude": float(req.pickup_latitude),
+        "pickup_longitude": float(req.pickup_longitude),
+        "pickup_address": str(req.pickup_address),
+        "dropoff_latitude": float(req.dropoff_latitude),
+        "dropoff_longitude": float(req.dropoff_longitude),
+        "dropoff_address": str(req.dropoff_address),
+    }
+    payload_hash = hashlib.sha256(
+        json.dumps(payload_dict, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
     # 1. Idempotency check if key provided
     if req.idempotency_key:
         stmt = select(IdempotencyKey).where(
@@ -53,6 +69,12 @@ async def create_ride(
         )
         existing = (await db.execute(stmt)).scalar_one_or_none()
         if existing:
+            # If payload changed, raise 409 Conflict
+            if existing.payload_hash and existing.payload_hash != payload_hash:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Idempotency key reused with different request payload.",
+                )
             return json.loads(existing.response_body)
 
     # 2. Check if rider already has an active ongoing ride
@@ -115,12 +137,32 @@ async def create_ride(
             user_id=current_user.id,
             key=req.idempotency_key,
             request_path="/api/v1/rides",
+            payload_hash=payload_hash,
             response_status=201,
             response_body=json.dumps(response_data),
         )
         db.add(idemp_record)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        # Handle concurrent retry race with identical idempotency key
+        if req.idempotency_key:
+            stmt = select(IdempotencyKey).where(
+                and_(
+                    IdempotencyKey.user_id == current_user.id,
+                    IdempotencyKey.key == req.idempotency_key,
+                )
+            )
+            existing = (await db.execute(stmt)).scalar_one_or_none()
+            if existing:
+                return json.loads(existing.response_body)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Conflict processing request.",
+        )
+
     await db.refresh(ride)
     return ride
 
@@ -154,7 +196,8 @@ async def accept_ride(
     current_user: User = Depends(require_role(UserRole.DRIVER)),
     db: AsyncSession = Depends(get_db),
 ):
-    driver_stmt = select(Driver).where(Driver.user_id == current_user.id)
+    # Atomic row-lock on driver
+    driver_stmt = select(Driver).where(Driver.user_id == current_user.id).with_for_update()
     driver = (await db.execute(driver_stmt)).scalar_one_or_none()
     if not driver:
         raise HTTPException(
@@ -163,24 +206,21 @@ async def accept_ride(
 
     if driver.status != DriverStatus.ONLINE:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Driver must be ONLINE to accept rides."
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Driver is not available to accept rides (must be ONLINE).",
         )
 
-    # Atomic lock on ride
+    # Atomic row-lock on ride
     ride_stmt = select(Ride).where(Ride.id == ride_id).with_for_update()
     ride = (await db.execute(ride_stmt)).scalar_one_or_none()
     if not ride:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ride not found.")
 
-    if ride.status not in [RideStatus.REQUESTED, RideStatus.MATCHING]:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail="Ride is no longer available."
-        )
+    # Validate transition through domain state machine
+    validate_and_apply_transition(ride, RideStatus.ACCEPTED)
 
     # Concurrency safe assignment
     ride.driver_id = driver.id
-    ride.status = RideStatus.ACCEPTED
-    ride.accepted_at = datetime.utcnow()
     driver.status = DriverStatus.BUSY
 
     db.add(
@@ -192,7 +232,15 @@ async def accept_ride(
         )
     )
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Driver already assigned to an active ride or concurrent assignment conflict.",
+        )
+
     await db.refresh(ride)
     return ride
 
@@ -203,7 +251,9 @@ async def arrive_ride(
     current_user: User = Depends(require_role(UserRole.DRIVER)),
     db: AsyncSession = Depends(get_db),
 ):
-    ride = (await db.execute(select(Ride).where(Ride.id == ride_id))).scalar_one_or_none()
+    ride = (
+        await db.execute(select(Ride).where(Ride.id == ride_id).with_for_update())
+    ).scalar_one_or_none()
     if not ride:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ride not found.")
 
@@ -215,12 +265,7 @@ async def arrive_ride(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not the assigned driver."
         )
 
-    if ride.status != RideStatus.ACCEPTED:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid status transition to ARRIVED."
-        )
-
-    ride.status = RideStatus.ARRIVED
+    validate_and_apply_transition(ride, RideStatus.ARRIVED)
     db.add(
         RideEvent(
             ride_id=ride.id, event_type="DRIVER_ARRIVED", actor_role="DRIVER", actor_id=driver.id
@@ -237,7 +282,9 @@ async def start_ride(
     current_user: User = Depends(require_role(UserRole.DRIVER)),
     db: AsyncSession = Depends(get_db),
 ):
-    ride = (await db.execute(select(Ride).where(Ride.id == ride_id))).scalar_one_or_none()
+    ride = (
+        await db.execute(select(Ride).where(Ride.id == ride_id).with_for_update())
+    ).scalar_one_or_none()
     if not ride:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ride not found.")
 
@@ -249,14 +296,7 @@ async def start_ride(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not the assigned driver."
         )
 
-    if ride.status != RideStatus.ARRIVED:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid status transition to IN_PROGRESS.",
-        )
-
-    ride.status = RideStatus.IN_PROGRESS
-    ride.picked_up_at = datetime.utcnow()
+    validate_and_apply_transition(ride, RideStatus.IN_PROGRESS)
     db.add(
         RideEvent(
             ride_id=ride.id, event_type="TRIP_STARTED", actor_role="DRIVER", actor_id=driver.id
@@ -273,27 +313,23 @@ async def complete_ride(
     current_user: User = Depends(require_role(UserRole.DRIVER)),
     db: AsyncSession = Depends(get_db),
 ):
-    ride = (await db.execute(select(Ride).where(Ride.id == ride_id))).scalar_one_or_none()
+    ride = (
+        await db.execute(select(Ride).where(Ride.id == ride_id).with_for_update())
+    ).scalar_one_or_none()
     if not ride:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ride not found.")
 
     driver = (
-        await db.execute(select(Driver).where(Driver.user_id == current_user.id))
+        await db.execute(
+            select(Driver).where(Driver.user_id == current_user.id).with_for_update()
+        )
     ).scalar_one_or_none()
     if not driver or ride.driver_id != driver.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not the assigned driver."
         )
 
-    if ride.status != RideStatus.IN_PROGRESS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid status transition to COMPLETED.",
-        )
-
-    ride.status = RideStatus.COMPLETED
-    ride.completed_at = datetime.utcnow()
-    ride.final_fare = ride.estimated_fare
+    validate_and_apply_transition(ride, RideStatus.COMPLETED)
     driver.status = DriverStatus.ONLINE  # Driver becomes available again
 
     db.add(
@@ -313,7 +349,9 @@ async def cancel_ride(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    ride = (await db.execute(select(Ride).where(Ride.id == ride_id))).scalar_one_or_none()
+    ride = (
+        await db.execute(select(Ride).where(Ride.id == ride_id).with_for_update())
+    ).scalar_one_or_none()
     if not ride:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ride not found.")
 
@@ -330,21 +368,14 @@ async def cancel_ride(
             status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to cancel this ride."
         )
 
-    # Cannot cancel completed or already cancelled ride, or ride in progress
-    if ride.status in [RideStatus.COMPLETED, RideStatus.CANCELLED, RideStatus.IN_PROGRESS]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot cancel ride in status '{ride.status}'.",
-        )
-
-    ride.status = RideStatus.CANCELLED
-    ride.cancelled_at = datetime.utcnow()
-    ride.cancellation_reason = req.reason
+    validate_and_apply_transition(ride, RideStatus.CANCELLED, cancellation_reason=req.reason)
 
     # Release driver back to ONLINE if assigned
     if ride.driver_id:
         assigned_driver = (
-            await db.execute(select(Driver).where(Driver.id == ride.driver_id))
+            await db.execute(
+                select(Driver).where(Driver.id == ride.driver_id).with_for_update()
+            )
         ).scalar_one_or_none()
         if assigned_driver:
             assigned_driver.status = DriverStatus.ONLINE

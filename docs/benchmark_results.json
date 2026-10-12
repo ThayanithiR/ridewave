@@ -1,0 +1,56 @@
+{
+  "metadata": {
+    "timestamp": "2026-10-12 17:55:04Z",
+    "python_version": "3.11.0 (main, Oct 24 2022, 18:26:48) [MSC v.1933 64 bit (AMD64)]",
+    "platform": "win32",
+    "redis_mode": "InMemoryRedisMock (Standalone mode)",
+    "pickup_coords": [
+      37.7749,
+      -122.4194
+    ],
+    "search_radius_km": 5.0,
+    "iterations_per_density": 100
+  },
+  "results": [
+    {
+      "driver_count": 10,
+      "iterations": 100,
+      "p50_ms": 1.508,
+      "p95_ms": 5.549,
+      "p99_ms": 6.442,
+      "mean_ms": 2.111,
+      "throughput_rps": 365.1,
+      "sample_matched_count": 2
+    },
+    {
+      "driver_count": 50,
+      "iterations": 100,
+      "p50_ms": 1.626,
+      "p95_ms": 5.976,
+      "p99_ms": 7.047,
+      "mean_ms": 2.339,
+      "throughput_rps": 331.2,
+      "sample_matched_count": 3
+    },
+    {
+      "driver_count": 100,
+      "iterations": 100,
+      "p50_ms": 2.412,
+      "p95_ms": 6.85,
+      "p99_ms": 8.116,
+      "mean_ms": 3.219,
+      "throughput_rps": 244.7,
+      "sample_matched_count": 13
+    },
+    {
+      "driver_count": 500,
+      "iterations": 100,
+      "p50_ms": 4.157,
+      "p95_ms": 7.728,
+      "p99_ms": 57.148,
+      "mean_ms": 5.032,
+      "throughput_rps": 170.7,
+      "sample_matched_count": 54
+    }
+  ]
+}
