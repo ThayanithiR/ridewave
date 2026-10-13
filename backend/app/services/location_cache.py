@@ -29,9 +29,29 @@ class RedisLocationStore:
         h3_index: str,
         ttl_seconds: int = 60,
     ) -> bool:
-        """Store ephemeral driver GPS ping in Redis with an auto-expiring TTL."""
+        """
+        Store ephemeral driver GPS ping in Redis.
+        Atomically updates the driver's cell membership:
+        - Reads previous H3 cell (if any) and removes driver from the old cell set.
+        - Adds driver to the new cell set.
+        - Updates the driver location key with new coordinates.
+        This prevents stale candidates lingering in old H3 buckets after a driver moves.
+        """
         try:
             client = await self.get_client()
+
+            # Read previous location to get previous h3_index for cleanup
+            prev_raw = await client.get(f"driver:{driver_id}:location")
+            if prev_raw:
+                try:
+                    prev_data = json.loads(prev_raw)
+                    prev_h3 = prev_data.get("h3_index")
+                    # Remove from old cell bucket if driver moved to a different cell
+                    if prev_h3 and prev_h3 != h3_index:
+                        await client.srem(f"h3:{prev_h3}:drivers", driver_id)
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
             payload = json.dumps(
                 {
                     "driver_id": driver_id,
@@ -43,7 +63,7 @@ class RedisLocationStore:
             )
             # 1. Update driver specific key
             await client.set(f"driver:{driver_id}:location", payload, ex=ttl_seconds)
-            # 2. Add driver to spatial cell bucket set
+            # 2. Add driver to new spatial cell bucket set
             await client.sadd(f"h3:{h3_index}:drivers", driver_id)
             await client.expire(f"h3:{h3_index}:drivers", ttl_seconds)
             return True

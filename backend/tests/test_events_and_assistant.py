@@ -47,6 +47,78 @@ async def test_transactional_outbox_pattern():
 
 
 @pytest.mark.asyncio
+async def test_outbox_written_in_same_transaction_as_ride():
+    """
+    Proves that OutboxEvent is written atomically in the same transaction as the ride:
+    1. Register a rider.
+    2. Create a ride via HTTP — both Ride and OutboxEvent must appear in the DB together.
+    3. Confirms the outbox has exactly 1 PENDING event for ride.requested.
+    """
+    from sqlalchemy import select as sa_select
+    from app.models import Ride, OutboxEvent
+
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async def override_get_db():
+        async with TestingSessionLocal() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    transport = ASGITransport(app=app)
+
+    try:
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            await client.post(
+                "/api/v1/auth/register",
+                json={"email": "outbox_rider@test.com", "password": "pass123",
+                      "full_name": "Outbox Rider", "role": "RIDER"},
+            )
+            token = (
+                await client.post(
+                    "/api/v1/auth/login",
+                    json={"email": "outbox_rider@test.com", "password": "pass123"},
+                )
+            ).json()["access_token"]
+
+            resp = await client.post(
+                "/api/v1/rides",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "pickup_latitude": 37.77,
+                    "pickup_longitude": -122.41,
+                    "pickup_address": "Outbox Pickup",
+                    "dropoff_latitude": 37.78,
+                    "dropoff_longitude": -122.42,
+                    "dropoff_address": "Outbox Dropoff",
+                },
+            )
+            assert resp.status_code == 201
+            ride_id = resp.json()["id"]
+
+        # Directly verify: Ride and OutboxEvent both exist
+        async with TestingSessionLocal() as session:
+            import uuid as _uuid
+            ride = (await session.execute(
+                sa_select(Ride).where(Ride.id == _uuid.UUID(ride_id))
+            )).scalar_one_or_none()
+            assert ride is not None
+
+            outbox_events = (await session.execute(
+                sa_select(OutboxEvent).where(
+                    OutboxEvent.aggregate_id == ride_id,
+                    OutboxEvent.event_type == "ride.requested",
+                )
+            )).scalars().all()
+            assert len(outbox_events) == 1, (
+                f"Expected exactly 1 outbox event for ride {ride_id}, got {len(outbox_events)}"
+            )
+            assert outbox_events[0].status == "PENDING"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_ai_trip_assistant_authorized_tool_isolation():
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

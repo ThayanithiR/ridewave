@@ -1,15 +1,24 @@
 import hashlib
 import json
+import math
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import and_, select, update
+from fastapi import APIRouter, Depends, HTTPException, Response, status
+from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user, require_role
 from app.core.database import get_db
+from app.events.outbox import TransactionalOutbox
+from app.events.schemas import (
+    DomainEvent,
+    RideAcceptedEvent,
+    RideCancelledEvent,
+    RideCompletedEvent,
+    RideRequestedEvent,
+)
 from app.models import (
     Driver,
     DriverStatus,
@@ -69,13 +78,18 @@ async def create_ride(
         )
         existing = (await db.execute(stmt)).scalar_one_or_none()
         if existing:
-            # If payload changed, raise 409 Conflict
+            # Always validate hash on replay — including concurrent conflict paths
             if existing.payload_hash and existing.payload_hash != payload_hash:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="Idempotency key reused with different request payload.",
                 )
-            return json.loads(existing.response_body)
+            # Replay: return 200 (not 201) to signal cached response
+            return Response(
+                content=existing.response_body,
+                status_code=status.HTTP_200_OK,
+                media_type="application/json",
+            )
 
     # 2. Check if rider already has an active ongoing ride
     active_ride_stmt = select(Ride).where(
@@ -120,15 +134,29 @@ async def create_ride(
     db.add(ride)
     await db.flush()
 
-    # Record event
-    event = RideEvent(
+    # Record ride lifecycle event
+    db.add(RideEvent(
         ride_id=ride.id,
         event_type="RIDE_REQUESTED",
         actor_role=current_user.role.value,
         actor_id=current_user.id,
         metadata_json={"estimated_fare": float(estimate.total_fare), "distance_km": distance},
+    ))
+
+    # --- Transactional Outbox: write domain event in the SAME transaction ---
+    await TransactionalOutbox.record_event(
+        db,
+        RideRequestedEvent(
+            aggregate_id=str(ride.id),
+            payload={
+                "ride_id": str(ride.id),
+                "rider_id": str(current_user.id),
+                "pickup_address": req.pickup_address,
+                "dropoff_address": req.dropoff_address,
+                "estimated_fare": float(estimate.total_fare),
+            },
+        ),
     )
-    db.add(event)
 
     # Store idempotency record if requested
     if req.idempotency_key:
@@ -157,7 +185,17 @@ async def create_ride(
             )
             existing = (await db.execute(stmt)).scalar_one_or_none()
             if existing:
-                return json.loads(existing.response_body)
+                # Re-validate payload hash even on the conflict retry path
+                if existing.payload_hash and existing.payload_hash != payload_hash:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Idempotency key reused with different request payload.",
+                    )
+                return Response(
+                    content=existing.response_body,
+                    status_code=status.HTTP_200_OK,
+                    media_type="application/json",
+                )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Conflict processing request.",
@@ -223,13 +261,24 @@ async def accept_ride(
     ride.driver_id = driver.id
     driver.status = DriverStatus.BUSY
 
-    db.add(
-        RideEvent(
-            ride_id=ride.id,
-            event_type="RIDE_ACCEPTED",
-            actor_role=current_user.role.value,
-            actor_id=driver.id,
-        )
+    db.add(RideEvent(
+        ride_id=ride.id,
+        event_type="RIDE_ACCEPTED",
+        actor_role=current_user.role.value,
+        actor_id=driver.id,
+    ))
+
+    # --- Transactional Outbox: same transaction as ride state change ---
+    await TransactionalOutbox.record_event(
+        db,
+        RideAcceptedEvent(
+            aggregate_id=str(ride.id),
+            payload={
+                "ride_id": str(ride.id),
+                "driver_id": str(driver.id),
+                "rider_id": str(ride.rider_id),
+            },
+        ),
     )
 
     try:
@@ -266,11 +315,9 @@ async def arrive_ride(
         )
 
     validate_and_apply_transition(ride, RideStatus.ARRIVED)
-    db.add(
-        RideEvent(
-            ride_id=ride.id, event_type="DRIVER_ARRIVED", actor_role="DRIVER", actor_id=driver.id
-        )
-    )
+    db.add(RideEvent(
+        ride_id=ride.id, event_type="DRIVER_ARRIVED", actor_role="DRIVER", actor_id=driver.id
+    ))
     await db.commit()
     await db.refresh(ride)
     return ride
@@ -297,11 +344,9 @@ async def start_ride(
         )
 
     validate_and_apply_transition(ride, RideStatus.IN_PROGRESS)
-    db.add(
-        RideEvent(
-            ride_id=ride.id, event_type="TRIP_STARTED", actor_role="DRIVER", actor_id=driver.id
-        )
-    )
+    db.add(RideEvent(
+        ride_id=ride.id, event_type="TRIP_STARTED", actor_role="DRIVER", actor_id=driver.id
+    ))
     await db.commit()
     await db.refresh(ride)
     return ride
@@ -332,11 +377,24 @@ async def complete_ride(
     validate_and_apply_transition(ride, RideStatus.COMPLETED)
     driver.status = DriverStatus.ONLINE  # Driver becomes available again
 
-    db.add(
-        RideEvent(
-            ride_id=ride.id, event_type="TRIP_COMPLETED", actor_role="DRIVER", actor_id=driver.id
-        )
+    db.add(RideEvent(
+        ride_id=ride.id, event_type="TRIP_COMPLETED", actor_role="DRIVER", actor_id=driver.id
+    ))
+
+    # --- Transactional Outbox ---
+    await TransactionalOutbox.record_event(
+        db,
+        RideCompletedEvent(
+            aggregate_id=str(ride.id),
+            payload={
+                "ride_id": str(ride.id),
+                "driver_id": str(driver.id),
+                "rider_id": str(ride.rider_id),
+                "final_fare": float(ride.final_fare or ride.estimated_fare),
+            },
+        ),
     )
+
     await db.commit()
     await db.refresh(ride)
     return ride
@@ -380,14 +438,25 @@ async def cancel_ride(
         if assigned_driver:
             assigned_driver.status = DriverStatus.ONLINE
 
-    db.add(
-        RideEvent(
-            ride_id=ride.id,
-            event_type="RIDE_CANCELLED",
-            actor_role=current_user.role.value,
-            actor_id=current_user.id,
-            metadata_json={"reason": req.reason},
-        )
+    db.add(RideEvent(
+        ride_id=ride.id,
+        event_type="RIDE_CANCELLED",
+        actor_role=current_user.role.value,
+        actor_id=current_user.id,
+        metadata_json={"reason": req.reason},
+    ))
+
+    # --- Transactional Outbox ---
+    await TransactionalOutbox.record_event(
+        db,
+        RideCancelledEvent(
+            aggregate_id=str(ride.id),
+            payload={
+                "ride_id": str(ride.id),
+                "cancelled_by_role": current_user.role.value,
+                "reason": req.reason,
+            },
+        ),
     )
 
     await db.commit()

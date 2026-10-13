@@ -111,10 +111,11 @@ RideWave is structured as a **modular monolith** with explicit domain boundaries
 | **Spatial Matching (H3)** | ✅ Implemented | Uber H3 Resolution 8 grid disk (19 cells) + Haversine distance ranking |
 | **GPS WebSocket Ingestion** | ✅ Implemented | Authenticated WSS with JWT, coordinate range checks (-90..90, -180..180), monotonic timestamps |
 | **Database Schema Migrations** | ✅ Implemented | Alembic migration scripts (`alembic upgrade head`), automated in CI pipeline |
-| **Transactional Outbox Pattern** | ✅ Implemented | Atomic outbox persistence in same DB transaction as ride state mutations |
+| **Transactional Outbox Pattern** | ✅ Implemented | `OutboxEvent` written in the same DB transaction as every ride state change (create, accept, complete, cancel). Tested atomically. |
 | **AI Trip Assistant** | ✅ Implemented | Zero-cost local Ollama (`llama3.2:3b`), OpenRouter fallback, deterministic offline fallback |
 | **Kafka Broker Streaming** | ⏳ Planned Work | Scoped for future distributed worker deployment (see [Architecture ADR-05](docs/architecture.md)) |
-| **Dynamic Surge Pricing Model** | ⏳ Planned Work | Real-time demand-to-supply ratio calculation per H3 cell |
+| **Dynamic Surge Pricing** | ⏳ Planned Work | Real-time demand-to-supply ratio calculation per H3 cell |
+| **WebSocket Multi-worker Fan-out** | ⚠️ Single-process | WS subscriptions are stored in process-local memory. Multiple Uvicorn workers require a Redis pub/sub bridge for cross-instance broadcast. |
 
 ---
 
@@ -138,8 +139,8 @@ For complete step-by-step instructions across Windows (PowerShell & CMD) and Lin
 
 ### 1. Clone & Setup Environment
 ```bash
-git clone https://github.com/vamsi080/RideWave.git
-cd RideWave
+git clone https://github.com/ThayanithiR/ridewave.git
+cd ridewave
 cp .env.example .env
 ```
 
@@ -188,18 +189,21 @@ python scripts/benchmark_matching.py --iterations 100 --output ../docs/benchmark
 
 ---
 
-## 📈 Measured Performance Benchmarks
+## 📈 Local Microbenchmark Results
 
-Measured on a local workstation (Intel Core i5-10210U @ 1.60GHz, 8GB RAM, Windows 11, Python 3.11):
+> [!IMPORTANT]
+> These are **local development measurements only** — not production throughput claims. Measured using SQLite and an in-memory Redis mock (not deployed PostgreSQL/Redis). Run `python backend/scripts/benchmark_matching.py` to reproduce on your hardware.
 
-| Driver Density | Matched Candidates (<= 5km) | Median p50 | Tail p95 | Tail p99 | Throughput |
+Measured on Intel Core i5-10210U @ 1.60GHz, 8GB RAM, Windows 11, Python 3.11 · **100 iterations · SQLite + in-memory Redis mock:**
+
+| Driver Density | Matched (≤ 5km) | Median p50 | Tail p95 | Tail p99 | Throughput |
 |:---:|:---:|:---:|:---:|:---:|:---:|
-| **10 drivers** | 2 | **1.51 ms** | **5.55 ms** | **6.44 ms** | **365.1 req/s** |
-| **50 drivers** | 3 | **1.63 ms** | **5.98 ms** | **7.05 ms** | **331.2 req/s** |
-| **100 drivers** | 13 | **2.41 ms** | **6.85 ms** | **8.12 ms** | **244.7 req/s** |
-| **500 drivers** | 54 | **4.16 ms** | **7.73 ms** | **57.15 ms** | **170.7 req/s** |
+| **10 drivers** | 2 | 1.51 ms | 5.55 ms | 6.44 ms | 365 req/s |
+| **50 drivers** | 3 | 1.63 ms | 5.98 ms | 7.05 ms | 331 req/s |
+| **100 drivers** | 13 | 2.41 ms | 6.85 ms | 8.12 ms | 245 req/s |
+| **500 drivers** | 54 | 4.16 ms | 7.73 ms | 57.15 ms | 171 req/s |
 
-*Full methodology, hardware context, and scalability analysis are available in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).*
+*Full methodology and scalability analysis: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).*
 
 ---
 
