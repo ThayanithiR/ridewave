@@ -58,7 +58,14 @@ export const api = {
       let msg = "Registration failed";
       try {
         const errData = await res.json();
-        msg = errData.detail || msg;
+        // FastAPI validation errors return detail as an array of {loc, msg, type} objects
+        if (Array.isArray(errData.detail)) {
+          msg = errData.detail.map((e: any) => e.msg || JSON.stringify(e)).join("; ");
+        } else if (typeof errData.detail === "string") {
+          msg = errData.detail;
+        } else if (errData.detail) {
+          msg = JSON.stringify(errData.detail);
+        }
       } catch {
         msg = `${res.status} ${res.statusText}`;
       }
@@ -77,7 +84,14 @@ export const api = {
       let msg = "Login failed";
       try {
         const errData = await res.json();
-        msg = errData.detail || msg;
+        // FastAPI validation errors return detail as an array of {loc, msg, type} objects
+        if (Array.isArray(errData.detail)) {
+          msg = errData.detail.map((e: any) => e.msg || JSON.stringify(e)).join("; ");
+        } else if (typeof errData.detail === "string") {
+          msg = errData.detail;
+        } else if (errData.detail) {
+          msg = JSON.stringify(errData.detail);
+        }
       } catch {
         msg = `${res.status} ${res.statusText}`;
       }
